@@ -59,7 +59,7 @@ GenericError::GenericError(generic_error_code C, StringRef Context) : Code(C) {
     ErrMsg += Context;
 }
 
-void GenericError::log(raw_ostream &OS) const { OS << ErrMsg << "\n"; }
+void GenericError::log(raw_ostream &OS) const { /*OS << ErrMsg << "\n";*/ }
 
 StringRef GenericError::getErrorMessage() const { return ErrMsg; }
 

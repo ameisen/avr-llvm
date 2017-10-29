@@ -28,6 +28,19 @@ def SDT_AVRTst : SDTypeProfile<0, 1, [SDTCisInt<0>]>;
 def SDT_AVRSelectCC : SDTypeProfile<1, 3, [SDTCisSameAs<0, 1>,
                                     SDTCisSameAs<1, 2>, SDTCisVT<3, i8>]>;
 
+class SDTCisI8   <int OpNum> : SDTCisVT<OpNum, i8>;
+class SDTCisCarryFlag <int OpNum> : SDTCisI8<OpNum>;
+
+def SDTIntOpCarryOut : SDTypeProfile<2, 1, [
+  SDTCisSameAs<0, 2>, SDTCisInt<0>, SDTCisCarryFlag<1>, SDTCisInt<2>
+]>;
+
+// SDTCisFlag<1>
+
+def SDTIntOpCarryInOut : SDTypeProfile<2, 2, [
+  SDTCisSameAs<0, 2>, SDTCisSameAs<1, 3>, SDTCisInt<0>, SDTCisCarryFlag<1>, SDTCisInt<2>, SDTCisCarryFlag<3>
+]>;
+
 //===----------------------------------------------------------------------===//
 // AVR Specific Node Definitions
 //===----------------------------------------------------------------------===//
@@ -55,11 +68,13 @@ def AVRtst : SDNode<"AVRISD::TST", SDT_AVRTst, [SDNPOutGlue]>;
 def AVRselectcc: SDNode<"AVRISD::SELECT_CC", SDT_AVRSelectCC, [SDNPInGlue]>;
 
 // Shift nodes.
-def AVRlsl : SDNode<"AVRISD::LSL", SDTIntUnaryOp>;
-def AVRlsr : SDNode<"AVRISD::LSR", SDTIntUnaryOp>;
-def AVRrol : SDNode<"AVRISD::ROL", SDTIntUnaryOp>;
-def AVRror : SDNode<"AVRISD::ROR", SDTIntUnaryOp>;
-def AVRasr : SDNode<"AVRISD::ASR", SDTIntUnaryOp>;
+def AVRlsl : SDNode<"AVRISD::LSL", SDTIntOpCarryOut, [SDNPOutGlue]>;
+def AVRlsr : SDNode<"AVRISD::LSR", SDTIntOpCarryOut, [SDNPOutGlue]>;
+def AVRrol : SDNode<"AVRISD::ROL", SDTIntOpCarryInOut, [SDNPOptInGlue, SDNPOutGlue]>;
+def AVRror : SDNode<"AVRISD::ROR", SDTIntOpCarryInOut, [SDNPOptInGlue, SDNPOutGlue]>;
+def AVRasr : SDNode<"AVRISD::ASR", SDTIntOpCarryOut, [SDNPOutGlue]>;
+def AVRswap : SDNode<"AVRISD::SWAP", SDTIntUnaryOp>;
+def AVRclr : SDNode<"AVRISD::CLR", SDTIntOpCarryOut, [SDNPOutGlue]>;
 
 // Pseudo shift nodes for non-constant shift amounts.
 def AVRlslLoop : SDNode<"AVRISD::LSLLOOP", SDTIntShiftOp>;
@@ -82,11 +97,65 @@ def imm16_neg_XFORM : SDNodeXForm<imm,
   return CurDAG->getTargetConstant(-N->getAPIntValue(), SDLoc(N), MVT::i16);
 }]>;
 
+def imm16_abs_XFORM : SDNodeXForm<imm,
+[{
+  return CurDAG->getTargetConstant(N->getSExtValue() > 0 ? N->getAPIntValue() : -N->getAPIntValue(), SDLoc(N), MVT::i16);
+}]>;
+
+def imm16_to_imm8_XFORM : SDNodeXForm<imm,
+[{
+  return CurDAG->getTargetConstant(int8_t(N->getZExtValue()), SDLoc(N), MVT::i8);
+}]>;
+
+def imm16_to_imm8_neg_XFORM : SDNodeXForm<imm,
+[{
+  return CurDAG->getTargetConstant(-int8_t(N->getSExtValue()), SDLoc(N), MVT::i8);
+}]>;
+
+def imm16_to_hi_imm8_XFORM : SDNodeXForm<imm,
+[{
+  return CurDAG->getTargetConstant(int8_t(N->getSExtValue() >> 8), SDLoc(N), MVT::i8);
+}]>;
+
+def imm16_to_hi_imm8_neg_XFORM : SDNodeXForm<imm,
+[{
+  return CurDAG->getTargetConstant(-int8_t(N->getSExtValue() >> 8), SDLoc(N), MVT::i8);
+}]>;
+
+def imm16_absneg_XFORM : SDNodeXForm<imm,
+[{
+  return CurDAG->getTargetConstant(N->getSExtValue() > 0 ? -N->getAPIntValue() : -N->getAPIntValue(), SDLoc(N), MVT::i16);
+}]>;
+
 def imm0_63_neg : PatLeaf<(imm),
 [{
   int64_t val = -N->getSExtValue();
   return val >= 0 && val < 64;
 }], imm16_neg_XFORM>;
+
+def imm0_63 : PatLeaf<(imm),
+[{
+  int64_t val = N->getSExtValue();
+  return val >= 0 && val < 64;
+}]>;
+
+def imm_lowmasked : PatLeaf<(imm),
+[{
+  uint64_t val = N->getZExtValue();
+  return (val & 0xFF) == 0;
+}]>;
+
+def imm_neg : PatLeaf<(imm),
+[{
+  int64_t val = N->getSExtValue();
+  return val < 0;
+}]>;
+
+def imm_pos : PatLeaf<(imm),
+[{
+  int64_t val = N->getSExtValue();
+  return val >= 0;
+}]>;
 
 def uimm6 : PatLeaf<(imm), [{ return isUInt<6>(N->getZExtValue()); }]>;
 
@@ -176,8 +245,8 @@ def brtarget_13 : Operand<OtherVT>
     let EncoderMethod = "encodeRelCondBrTarget<AVR::fixup_13_pcrel>";
 }
 
-// The target of a 22 or 16-bit call/jmp instruction.
 def call_target : Operand<iPTR>
+// The target of a 22 or 16-bit call/jmp instruction.
 {
     let EncoderMethod = "encodeCallTarget";
 }
@@ -732,7 +801,7 @@ Defs = [SREG] in
 // This operation is identical to a `Rd AND Rd`.
 //def : InstAlias<"tst\t$rd", (ANDRdRr GPR8:$rd, GPR8:$rd), 1>;
 
-let Defs = [SREG] in
+let isCodeGenOnly = 1, Defs = [SREG] in
 def TSTRd : FTST<0b0010,
                   0b00,
                   (outs),
@@ -1618,6 +1687,7 @@ def LATZRd : FZRd<0b111,
 let Constraints = "$src = $rd",
 Defs = [SREG] in
 {
+  let isCodeGenOnly = 1 in
   def LSLRd : FRdRr<0b0000,
                     0b11,
                     (outs GPR8:$rd),
@@ -1657,29 +1727,30 @@ Defs = [SREG] in
   // Bit rotate operations.
   let Uses = [SREG] in
   {
+    let isCodeGenOnly = 1 in
     def ROLRd : FRdRr<0b0001,
                       0b11,
                       (outs GPR8:$rd),
                       (ins GPR8:$src),
                       "rol\t$rd",
-                      [(set i8:$rd, (AVRrol i8:$src)), (implicit SREG)]>;
+                      [(set i8:$rd, (AVRrol i8:$src, SREG)), (implicit SREG)]>;
 
     def ROLWRd : Pseudo<(outs DREGS:$rd),
                         (ins DREGS:$src),
                         "rolw\t$rd",
-                        [(set i16:$rd, (AVRrol i16:$src)), (implicit SREG)]>;
+                        [(set i16:$rd, (AVRrol i16:$src, SREG)), (implicit SREG)]>;
 
     def RORRd : FRd<0b1001,
                     0b0100111,
                     (outs GPR8:$rd),
                     (ins GPR8:$src),
                     "ror\t$rd",
-                    [(set i8:$rd, (AVRror i8:$src)), (implicit SREG)]>;
+                    [(set i8:$rd, (AVRror i8:$src, SREG)), (implicit SREG)]>;
 
     def RORWRd : Pseudo<(outs DREGS:$rd),
                         (ins DREGS:$src),
                         "rorw\t$rd",
-                        [(set i16:$rd, (AVRror i16:$src)), (implicit SREG)]>;
+                        [(set i16:$rd, (AVRror i16:$src, SREG)), (implicit SREG)]>;
   }
 }
 
@@ -1692,6 +1763,25 @@ def SWAPRd : FRd<0b1001,
                  (ins GPR8:$src),
                  "swap\t$rd",
                  [(set i8:$rd, (bswap i8:$src))]>;
+
+// I don't think that this should be bswap. Either way, I can't use bswap
+// to generate nodes on i8s as it's not what it is meant for.
+let Constraints = "$src = $rd" in
+def NIBBLESWAPRd : FRd<0b1001,
+                 0b0100010,
+                 (outs GPR8:$rd),
+                 (ins GPR8:$src),
+                 "swap\t$rd",
+                 [(set i8:$rd, (AVRswap i8:$src))]>;
+
+// Clear Register
+let Defs = [SREG], Constraints = "$src = $rd" in
+def CLRRd : FRdRr<0b0010,
+                0b01,
+                (outs GPR8:$rd),
+                (ins GPR8:$src),
+                "clr\t$rd",
+                [(set i8:$rd, (AVRclr i8:$src)), (implicit SREG)]>;
 
 // IO register bit set/clear operations.
 //:TODO: add patterns when popcount(imm)==2 to be expanded with 2 sbi/cbi
@@ -1731,6 +1821,7 @@ Defs = [SREG] in
 {
   // SBR Rd, K
   // Alias for ORI Rd, K
+  let isCodeGenOnly = 1 in
   def SBRRdK : FRdK<0b0110,
                     (outs LD8:$rd),
                     (ins LD8:$src, imm_ldi8:$k),
@@ -1742,6 +1833,7 @@ Defs = [SREG] in
   // Alias for `ANDI Rd, COM(K)` where COM(K) is the complement of K.
   // FIXME: This uses the 'complement' encoder. We need it to also use the
   // imm_ldi8 encoder. This will cause no fixups to be created on this instruction.
+  let isCodeGenOnly = 1 in
   def CBRRdK : FRdK<0b0111,
                     (outs LD8:$rd),
                     (ins LD8:$src, imm_com8:$k),
@@ -2019,10 +2111,18 @@ def : Pat<(addc DREGS:$src, DREGS:$src2),
 // all sub instruction variants always writes the carry flag
 def : Pat<(subc i8:$src, i8:$src2),
           (SUBRdRr i8:$src, i8:$src2)>;
-def : Pat<(subc i16:$src, i16:$src2),
-          (SUBWRdRr i16:$src, i16:$src2)>;
 def : Pat<(subc i8:$src, imm:$src2),
           (SUBIRdK i8:$src, imm:$src2)>;
+def : Pat<(subc i16:$src, i16:$src2),
+          (SUBWRdRr i16:$src, i16:$src2)>;
+
+def : Pat<(subc i16:$src, imm0_63_neg:$src2),
+          (ADIWRdK i16:$src, (imm16_abs_XFORM imm:$src2))>;
+def : Pat<(subc i16:$src, imm0_63:$src2),
+          (SUBIWRdK i16:$src, imm:$src2)>;
+// This are for when the low byte of the immediate is zero
+def : Pat<(subc i16:$src1, imm_lowmasked:$src2),
+          (INSERT_SUBREG i16:$src1, (SUBIRdK (i8 (EXTRACT_SUBREG i16:$src1, sub_hi)), (imm16_to_hi_imm8_XFORM imm:$src2)), sub_hi)>;
 def : Pat<(subc i16:$src, imm:$src2),
           (SUBIWRdK i16:$src, imm:$src2)>;
 
@@ -2030,11 +2130,24 @@ def : Pat<(subc i16:$src, imm:$src2),
 // any add with imm instructions. Also take care of the adiw/sbiw instructions.
 def : Pat<(add i16:$src1, imm0_63_neg:$src2),
           (SBIWRdK i16:$src1, (imm0_63_neg:$src2))>;
+def : Pat<(add i16:$src1, imm0_63:$src2),
+          (ADIWRdK i16:$src1, $src2)>;
+
+// These are for when the low byte of the immediate is zero
+def : Pat<(add i16:$src1, imm_lowmasked:$src2),
+          (INSERT_SUBREG i16:$src1, (SUBIRdK (i8 (EXTRACT_SUBREG i16:$src1, sub_hi)), (imm16_to_hi_imm8_neg_XFORM imm:$src2)), sub_hi)>;
+def : Pat<(addc i16:$src1, imm_lowmasked:$src2),
+          (INSERT_SUBREG i16:$src1, (SUBIRdK (i8 (EXTRACT_SUBREG i16:$src1, sub_hi)), (imm16_to_hi_imm8_neg_XFORM imm:$src2)), sub_hi)>;
+def : Pat<(adde i16:$src1, imm_lowmasked:$src2),
+          (INSERT_SUBREG i16:$src1, (SBCIRdK (i8 (EXTRACT_SUBREG i16:$src1, sub_hi)), (imm16_to_hi_imm8_neg_XFORM imm:$src2)), sub_hi)>;
+
 def : Pat<(add i16:$src1, imm:$src2),
           (SUBIWRdK i16:$src1, (imm16_neg_XFORM imm:$src2))>;
 def : Pat<(addc i16:$src1, imm:$src2),
           (SUBIWRdK i16:$src1, (imm16_neg_XFORM imm:$src2))>;
-def : Pat<(adde i16:$src1, imm:$src2),
+def : Pat<(adde i16:$src1, imm_pos:$src2),
+          (ADCWRdRr i16:$src1, imm:$src2)>;
+def : Pat<(adde i16:$src1, imm_neg:$src2),
           (SBCIWRdK i16:$src1, (imm16_neg_XFORM imm:$src2))>;
 
 def : Pat<(add i8:$src1, imm:$src2),

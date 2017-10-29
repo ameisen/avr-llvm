@@ -249,6 +249,8 @@ const char *AVRTargetLowering::getTargetNodeName(unsigned Opcode) const {
     NODE(CMPC);
     NODE(TST);
     NODE(SELECT_CC);
+    NODE(SWAP);
+    NODE(CLR);
 #undef NODE
   }
 }
@@ -272,6 +274,10 @@ SDValue AVRTargetLowering::LowerShifts(SDValue Op, SelectionDAG &DAG) const {
     switch (Op.getOpcode()) {
     default:
       llvm_unreachable("Invalid shift opcode!");
+      // TODO : Instead of shifting this way with non-constant shifts, we should instead
+      // prefer to loop on a larger value first, to bring costs down overall. For instance,
+      // shifting by 4 is only two cycles, whereas in a shift-1 loop, it's 4. This is only
+      // worthwhile on larger types, however.
     case ISD::SHL:
       return DAG.getNode(AVRISD::LSLLOOP, dl, VT, N->getOperand(0),
                          N->getOperand(1));
@@ -293,24 +299,200 @@ SDValue AVRTargetLowering::LowerShifts(SDValue Op, SelectionDAG &DAG) const {
   uint64_t ShiftAmount = cast<ConstantSDNode>(N->getOperand(1))->getZExtValue();
   SDValue Victim = N->getOperand(0);
 
+  // If the shift is by zero somehow, just return the Victim unchanged.
+  if (ShiftAmount == 0)
+  {
+    return Victim;
+  }
+
+  const auto gen_SRA = [&]() {
+    // AVRISD::ASR
+    return false;
+  };
+
+  const auto gen_ROTL = [&]() {
+    // AVRISD::ROL
+    return false;
+  };
+
+  const auto gen_ROTR = [&]() {
+    // AVRISD::ROR
+    return false;
+  };
+
+  const auto gen_SRL = [&]() {
+    // AVRISD::LSR
+
+    switch (VT.getSizeInBits())
+    {
+    case 8: {
+      switch (ShiftAmount)
+      {
+      case 1:
+      case 2:
+      case 3: {
+        // Up until 4 bits, it is cheaper to just shift that many times.
+        while (ShiftAmount--) {
+          Victim = DAG.getNode(AVRISD::LSR, dl, VT, Victim);
+        }
+      } return true;
+      case 4: {
+        Victim = DAG.getNode(AVRISD::SWAP, dl, VT, Victim);
+        Victim = DAG.getNode(ISD::AND, dl, VT, Victim,
+          DAG.getTargetConstant(uint8_t(0b00001111), dl, MVT::i8));
+      } return true;
+      case 5: {
+        Victim = DAG.getNode(AVRISD::SWAP, dl, VT, Victim);
+        Victim = DAG.getNode(AVRISD::LSR, dl, VT, Victim);
+        Victim = DAG.getNode(ISD::AND, dl, VT, Victim,
+          DAG.getTargetConstant(uint8_t(0b00000111), dl, MVT::i8));
+      } return true;
+      case 6: {
+        Victim = DAG.getNode(AVRISD::SWAP, dl, VT, Victim);
+        Victim = DAG.getNode(AVRISD::LSR, dl, VT, Victim);
+        Victim = DAG.getNode(AVRISD::LSR, dl, VT, Victim);
+        Victim = DAG.getNode(ISD::AND, dl, VT, Victim,
+          DAG.getTargetConstant(uint8_t(0b00000011), dl, MVT::i8));
+      } return true;
+      case 7: {
+        Victim = DAG.getNode(AVRISD::ROL, dl, VT, Victim);
+        Victim = DAG.getNode(AVRISD::CLR, dl, VT, Victim);
+        Victim = DAG.getNode(AVRISD::ROL, dl, VT, Victim);
+      } return true;
+      case 8: {
+        if (Victim.getNode())
+        {
+          DAG.DeleteNode(Victim.getNode());
+        }
+        DAG.RemoveDeadNodes();
+        // Originally I returned a constant 0. CLR is... clearer.
+        Victim = DAG.getTargetConstant(0, dl, Victim.getSimpleValueType());
+        return true;
+      }
+      }
+    } break;
+    case 16: {
+      SDValue VictimSub[2] = {
+        DAG.getTargetExtractSubreg(AVR::sub_lo, dl,
+        MVT::i8, Victim),
+        DAG.getTargetExtractSubreg(AVR::sub_hi, dl,
+        MVT::i8, Victim)
+      };
+
+      const auto rebuild_victim = [&]()
+      {
+        // maybe DREG?
+        const SDValue Ops[] = {
+          DAG.getTargetConstant(AVR::DLDREGSRegClassID, dl, MVT::i32),
+          VictimSub[0], DAG.getTargetConstant(AVR::sub_lo, dl, MVT::i32),
+          VictimSub[1], DAG.getTargetConstant(AVR::sub_hi, dl, MVT::i32)
+        };
+        Victim = SDValue(DAG.getMachineNode(TargetOpcode::REG_SEQUENCE, dl, VT, Ops), 0);
+      };
+
+      switch (ShiftAmount)
+      {
+      case 1: {
+        VictimSub[1] = DAG.getNode(AVRISD::LSR, dl, { MVT::i8, MVT::i8 }, VictimSub[1]);
+        VictimSub[0] = DAG.getNode(AVRISD::ROR, dl, { MVT::i8, MVT::i8 }, { VictimSub[0], VictimSub[1].getValue(1) });
+        rebuild_victim();
+      } return true;
+      case 2: {
+        VictimSub[1] = DAG.getNode(AVRISD::LSR, dl, { MVT::i8, MVT::i8 }, VictimSub[1]);
+        VictimSub[0] = DAG.getNode(AVRISD::ROR, dl, { MVT::i8, MVT::i8 }, { VictimSub[0], VictimSub[1].getValue(1) });
+        VictimSub[1] = DAG.getNode(AVRISD::LSR, dl, { MVT::i8, MVT::i8 }, VictimSub[1]);
+        VictimSub[0] = DAG.getNode(AVRISD::ROR, dl, { MVT::i8, MVT::i8 }, { VictimSub[0], VictimSub[1].getValue(1) });
+        rebuild_victim();
+      } return true;
+      case 3: {
+      } return true;
+      case 4: {
+      } return true;
+      case 5: {
+      } return true;
+      case 6: {
+      } return true;
+      case 7: {
+      } return true;
+      case 8: {
+      } return true;
+      case 9: {
+      } return true;
+      case 10: {
+      } return true;
+      case 11: {
+      } return true;
+      case 12: {
+      } return true;
+      case 13: {
+      } return true;
+      case 14: {
+      } return true;
+      case 15: {
+      } return true;
+      case 16: {
+        if (Victim.getNode())
+        {
+          DAG.DeleteNode(Victim.getNode());
+        }
+        DAG.RemoveDeadNodes();
+        // Originally I returned a constant 0. CLR is... clearer.
+        Victim = DAG.getTargetConstant(0, dl, Victim.getSimpleValueType());
+        return true;
+      }
+      }
+    } break;
+    case 24: {
+    } break;
+      llvm_unreachable("int24 shifts unimplemented"); break;
+    case 32: {
+    } break;
+    case 48: {
+    } break;
+      llvm_unreachable("int48 shifts unimplemented"); break;
+    case 64: {
+    } break;
+    default:
+      llvm_unreachable("unsupported size right now"); break;
+    }
+    return false;
+  };
+  
+  const auto gen_SHL = [&]() {
+    // AVRISD::LSL
+    return false;
+  };
+
+  bool handled = false;
+
   switch (Op.getOpcode()) {
-  case ISD::SRA:
+  case ISD::SRA: // arithmetic right shift
+    handled = gen_SRA();
     Opc8 = AVRISD::ASR;
     break;
-  case ISD::ROTL:
+  case ISD::ROTL: // rotate left C <- (value >> 1) <- C
+    handled = gen_ROTL();
     Opc8 = AVRISD::ROL;
     break;
-  case ISD::ROTR:
+  case ISD::ROTR: // rotate right C -> (value >> 1) -> C
+    handled = gen_ROTR();
     Opc8 = AVRISD::ROR;
     break;
-  case ISD::SRL:
+  case ISD::SRL: // logical right shift
+    handled = gen_SRL();
     Opc8 = AVRISD::LSR;
     break;
-  case ISD::SHL:
+  case ISD::SHL: // logial left shift
+    handled = gen_SHL();
     Opc8 = AVRISD::LSL;
     break;
   default:
     llvm_unreachable("Invalid shift opcode");
+  }
+
+  if (handled)
+  {
+    return Victim;
   }
 
   while (ShiftAmount--) {
